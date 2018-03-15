@@ -410,5 +410,6 @@ abline(v=rhoHPD,lty=2,lwd=2)
 ### Sidenote
 
 It was a refreshing change to learn Bayesian statistics. In my opinion, following the tutorial, the learning process went smoothly and I had no severe problems for the programming. Please give [it](http://www.ling.uni-potsdam.de/~vasishth/statistics/BayesLMMs.html) a try if interested.  
+  
 Cheers!  
 Yu-Han
