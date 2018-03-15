@@ -1,0 +1,203 @@
+---
+title: ""
+author: ""
+date: ""
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Bayesian linear mixed models using RStan
+
+## Yu-Han Luo
+
+
+This is only the supplementary materials for my homework.  
+It is provided as it is and I will **not** provide technical helps. 
+
+  
+
+## Before model fitting ...
+
+- [Data](http://users.stat.ufl.edu/~winner/data/brain.dat)
+   [Source](http://users.stat.ufl.edu/~winner/datasets.html)
+  
+- [Description](http://users.stat.ufl.edu/~winner/data/brain.txt)
+```{r}
+# load data
+dat = read.table("data/brain.dat")
+colnames(dat) = c("period", "id", "treatment", "rating")
+dat$treatment = as.factor(dat$treatment)
+# reset id
+dat$id = 1:length(unique(dat$id))
+# relative time
+dat$time = as.integer(dat$period-1)
+```
+
+  
+
+```{r}
+# load packages (I'm lazy)
+pacman::p_load(lme4, tidyverse, rstan, coda)
+```
+
+### Eyeballing data
+```{r}
+str(dat)
+
+ggplot(dat, aes(x=time, y=rating))+
+  geom_point(size=3)+
+  geom_line(aes(group=id))+
+  stat_smooth(method="lm", size=3)+
+  scale_x_continuous(labels=c(0,1,2), breaks=seq(0,2))+
+  labs(x="\nTime", y="Rating\n")+
+  theme_classic()+
+  theme(axis.title=element_text(color="black", size=12),
+        axis.text=element_text(color="black", size=12))
+```
+Though treatment was an important predictor of the data, it was ignored for simplification.
+  
+---
+
+## Growth curve analysis
+
+### Frequentist LMM
+
+#### Fitting model using `lme4`
+
+```{r}
+rst = lmer(rating~time+(1+time|id), data=dat)  # by-subject random intercepts and slopes
+summary(rst)
+```
+
+  
+### Bayesian LMM
+
+#### preparation for connection with [Stan](http://mc-stan.org/)
+```{r}
+# prepare the data for Stan
+stanDat = list(time = as.integer(dat$time),
+               id = as.integer(dat$id),
+               rating = dat$rating,
+               N = nrow(dat),  # number of data points
+               J = length(unique(dat$id)),# number of subjects
+               K = length(unique(dat$time)))  # number of waves
+# provide Stan the model parameters
+ranSlpFit = stan(file="ranIntSlp.stan", data=stanDat, iter=2000, chains=4)
+```
+
+  
+
+`ranIntSlp.stan` is modified from [the Rstan tutorial](https://github.com/vasishth/BayesLMMTutorial)
+
+```
+data {
+  int<lower=1> N;                  //number of data points
+  real rating[N];                  //rating
+  real<lower=0,upper=2> time[N];   //predictor(time)
+  int<lower=1> J;                  //number of subjects
+  int<lower=1, upper=J> id[N];     //subject id
+}
+
+parameters {
+  vector[2] beta;                  //intercept and slope
+  real<lower=0> sigma_e;           //error sd
+  vector<lower=0>[2] sigma_u;      //subj sd
+  cholesky_factor_corr[2] L_u;
+  matrix[2,J] z_u;
+}
+
+transformed parameters{
+  matrix[2,J] u;
+  u = diag_pre_multiply(sigma_u,L_u) * z_u;	//subj random effects
+}
+
+model {
+  real mu;
+  //priors
+  L_u ~ lkj_corr_cholesky(2.0);
+  to_vector(z_u) ~ normal(0,1);
+  //likelihood
+  for (i in 1:N){
+    mu = beta[1] + u[1,id[i]] +(beta[2] + u[2,id[i]]) * time[i];
+    rating[i] ~ normal(mu,sigma_e);
+  }
+}
+```
+
+#### Get credible intervals for parameters
+```{r}
+print(ranSlpFit, pars = c("beta", "sigma_e", "sigma_u"),
+      probs = c(0.025, 0.5, 0.975))
+# check "significance"
+beta1 <- extract(ranSlpFit, pars = c("beta[2]"))$beta
+mean(beta1 < 0)
+```
+
+  
+  
+
+#### TL;DR: examine the posterior density distribution
+
+```{r}
+# L matrices
+L_u <- extract(ranSlpFit, pars = "L_u")$L_u
+# correlation parameters
+cor_u <- apply(L_u, 1, function(x) tcrossprod(x)[1, 2])
+# 95CI for correlation between varying intercepts and slopes
+print(signif(quantile(cor_u, probs = c(0.025, 0.5, 0.975)), 3))
+
+J<-length(unique(dat$id))
+u<-matrix(nrow=2,ncol=J)
+# ugly codes, but I'm lazy so...
+for(j in 1:J)
+  for(i in 1:2)
+    u[i,j]<-mean(extract(ranSlpFit,pars=c(paste("u[",i,",",j,"]",sep="")))[[1]])
+
+N_sample<-length(extract(ranSlpFit,pars="L_u[1,1]")[[1]])
+L_u<-array(dim=c(2,2,N_sample))
+for(i in 1:2)
+  for(j in 1:2)
+    L_u[i,j,]<-extract(ranSlpFit,pars=c(paste("L_u[",i,",",j,"]",sep="")))[[1]]
+
+rho_u<-numeric()
+for(i in 1:N_sample){
+  rho_u<-L_u[,,i]%*%t(L_u[,,i])
+  rho_u[i]<-rho_u[1,2]
+}
+# Visualize the posterior distribution for the intercept beta[1] ...
+plot(u[1,],u[2,], bg="black", xlab=expression(hat(u[0])),ylab=expression(hat(u[1])))
+
+# Get HPD interval for beta[2]
+beta1<-as.mcmc(unlist(extract(ranSlpFit,pars="beta[2]")))
+betaHPD<-HPDinterval(beta1,prob=0.95)
+# Get HPD interval for rho_u
+N_iter<-length(beta1)
+rho_u<-numeric(N_iter)
+L_u<-array(dim=c(2,2,N_iter))
+for(i in 1:2)
+  for(j in 1:2)
+    L_u[i,j,]<-extract(ranSlpFit,pars=paste("L_u[",i,",",j,"]",sep=""))[[1]]
+for(i in 1:N_iter)
+  rho_u[i] <- tcrossprod(L_u[,,i])[1,2]
+rho_u<-as.mcmc(rho_u)
+rhoHPD<-HPDinterval(rho_u,prob=0.95)
+# PLOT HPD INTERVALS ON THE MARGINAL POSTERIORS
+par(mfrow=c(1,2))
+hist(beta1,freq=FALSE,col="black",border="white",xaxt="n",
+     main=NULL,xlab=expression(hat(beta)[1]))
+abline(v=betaHPD,lty=2,lwd=2)
+axis(1, at = seq(-.1,.1,length.out=5), labels = seq(-.1,.1,length.out=5))
+hist(rho_u,freq=FALSE,col="black",border="white",
+     main=NULL,xlab=expression(hat(rho)[u]),xlim=c(-1,1))
+abline(v=rhoHPD,lty=2,lwd=2)
+
+```
+
+### Sidenote
+
+It was a refreshing change to learn Bayesian statistics. In my opinion, following the tutorial, the learning process went smoothly and I had no severe problems for the programming. Please give [it](http://www.ling.uni-potsdam.de/~vasishth/statistics/BayesLMMs.html) a try if interested.  
+Cheers!  
+Yu-Han
