@@ -1,6 +1,6 @@
 ---
-title: ""
-author: ""
+title: "Bayesian linear mixed models using RStan"
+author: "Yu-Han Luo"
 date: ""
 output: 
   html_document:
